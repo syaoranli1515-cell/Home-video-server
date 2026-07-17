@@ -2,7 +2,7 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const cors = require('cors');
-const db = require('./db/database');
+const { getDatabase, saveDatabase } = require('./db/database');
 const MediaScanner = require('./utils/scanner');
 
 const app = express();
@@ -34,14 +34,14 @@ function saveConfig(config) {
 }
 
 // Check if setup is complete
-app.get('/api/setup-status', (req, res) => {
+app.get('/api/setup-status', async (req, res) => {
   const config = loadConfig();
   const isSetup = !!(config && config.ffmpegPath && config.mediaPath);
   res.json({ isSetup, config });
 });
 
 // Save FFmpeg path
-app.post('/api/setup/ffmpeg', (req, res) => {
+app.post('/api/setup/ffmpeg', async (req, res) => {
   const { ffmpegPath } = req.body;
   
   if (!ffmpegPath || !fs.existsSync(ffmpegPath)) {
@@ -91,34 +91,56 @@ app.post('/api/setup/media', async (req, res) => {
 });
 
 // Get all folders
-app.get('/api/folders', (req, res) => {
-  const folders = db.prepare('SELECT DISTINCT folder_name FROM videos ORDER BY folder_name').all();
-  res.json(folders.map(f => f.folder_name));
+app.get('/api/folders', async (req, res) => {
+  const db = await getDatabase();
+  const result = db.exec('SELECT DISTINCT folder_name FROM videos ORDER BY folder_name');
+  const folders = result.length > 0 ? result[0].values.map(row => row[0]) : [];
+  res.json(folders);
 });
 
 // Get videos by folder
-app.get('/api/videos', (req, res) => {
+app.get('/api/videos', async (req, res) => {
   const { folder } = req.query;
+  const db = await getDatabase();
   
-  let query;
+  let result;
   if (folder && folder !== 'All') {
-    query = db.prepare('SELECT * FROM videos WHERE folder_name = ? ORDER BY filename');
-    var videos = query.all(folder);
+    result = db.exec('SELECT * FROM videos WHERE folder_name = ? ORDER BY filename', [folder]);
   } else {
-    query = db.prepare('SELECT * FROM videos ORDER BY folder_name, filename');
-    videos = query.all();
+    result = db.exec('SELECT * FROM videos ORDER BY folder_name, filename');
   }
+  
+  if (result.length === 0) {
+    return res.json([]);
+  }
+  
+  const columns = result[0].columns;
+  const videos = result[0].values.map(row => {
+    const video = {};
+    columns.forEach((col, i) => {
+      video[col] = row[i];
+    });
+    return video;
+  });
   
   res.json(videos);
 });
 
 // Stream video
-app.get('/api/video/:id', (req, res) => {
-  const video = db.prepare('SELECT * FROM videos WHERE id = ?').get(req.params.id);
+app.get('/api/video/:id', async (req, res) => {
+  const db = await getDatabase();
+  const result = db.exec('SELECT * FROM videos WHERE id = ?', [parseInt(req.params.id)]);
   
-  if (!video) {
+  if (result.length === 0 || result[0].values.length === 0) {
     return res.status(404).json({ error: 'Video not found' });
   }
+  
+  const columns = result[0].columns;
+  const row = result[0].values[0];
+  const video = {};
+  columns.forEach((col, i) => {
+    video[col] = row[i];
+  });
 
   if (!fs.existsSync(video.file_path)) {
     return res.status(404).json({ error: 'Video file not found' });
