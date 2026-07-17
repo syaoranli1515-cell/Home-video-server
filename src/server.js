@@ -4,6 +4,7 @@ const fs = require('fs');
 const cors = require('cors');
 const { getDatabase, saveDatabase } = require('./db/database');
 const MediaScanner = require('./utils/scanner');
+const VideoConverter = require('./utils/converter');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,6 +16,7 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '../public')));
 app.use('/thumbnails', express.static(path.join(__dirname, '../public/thumbnails')));
+app.use('/converted', express.static(path.join(__dirname, '../public/converted')));
 
 // Helper to load config
 function loadConfig() {
@@ -146,11 +148,20 @@ app.get('/api/video/:id', async (req, res) => {
     video[col] = row[i];
   });
 
-  if (!fs.existsSync(video.file_path)) {
+  // Get best playable path (converted or original)
+  const config = loadConfig();
+  const converter = new VideoConverter(config.ffmpegPath);
+  const playable = await converter.getBestPlayablePath(video);
+
+  if (!playable.path) {
+    return res.status(404).json({ error: 'No playable version available' });
+  }
+
+  if (!fs.existsSync(playable.path)) {
     return res.status(404).json({ error: 'Video file not found' });
   }
 
-  const stat = fs.statSync(video.file_path);
+  const stat = fs.statSync(playable.path);
   const fileSize = stat.size;
   const range = req.headers.range;
 
@@ -159,7 +170,7 @@ app.get('/api/video/:id', async (req, res) => {
     const start = parseInt(parts[0], 10);
     const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
     const chunksize = (end - start) + 1;
-    const file = fs.createReadStream(video.file_path, { start, end });
+    const file = fs.createReadStream(playable.path, { start, end });
     
     const headers = {
       'Content-Range': `bytes ${start}-${end}/${fileSize}`,
@@ -177,7 +188,7 @@ app.get('/api/video/:id', async (req, res) => {
     };
     
     res.writeHead(200, headers);
-    fs.createReadStream(video.file_path).pipe(res);
+    fs.createReadStream(playable.path).pipe(res);
   }
 });
 
@@ -196,6 +207,90 @@ app.post('/api/rescan', async (req, res) => {
     res.json({ success: true, results });
   } catch (err) {
     res.status(500).json({ error: 'Rescan failed', details: err.message });
+  }
+});
+
+// Get video conversions
+app.get('/api/video/:id/conversions', async (req, res) => {
+  const db = await getDatabase();
+  const result = db.exec('SELECT * FROM videos WHERE id = ?', [parseInt(req.params.id)]);
+  
+  if (result.length === 0 || result[0].values.length === 0) {
+    return res.status(404).json({ error: 'Video not found' });
+  }
+
+  const config = loadConfig();
+  const converter = new VideoConverter(config.ffmpegPath);
+  const conversions = await converter.getConversionsForVideo(parseInt(req.params.id));
+  
+  // Check if original is mp4
+  const columns = result[0].columns;
+  const row = result[0].values[0];
+  const video = {};
+  columns.forEach((col, i) => {
+    video[col] = row[i];
+  });
+
+  const isMp4 = path.extname(video.file_path).toLowerCase() === '.mp4';
+  
+  res.json({ 
+    isOriginalMp4: isMp4,
+    conversions 
+  });
+});
+
+// Start video conversion
+app.post('/api/video/:id/convert', async (req, res) => {
+  const { quality } = req.body;
+  
+  if (!quality || !['720p', '1080p', '2k'].includes(quality)) {
+    return res.status(400).json({ error: 'Invalid quality option' });
+  }
+
+  const config = loadConfig();
+  if (!config.ffmpegPath) {
+    return res.status(400).json({ error: 'FFmpeg not configured' });
+  }
+
+  const converter = new VideoConverter(config.ffmpegPath);
+  
+  try {
+    const result = await converter.convertVideo(parseInt(req.params.id), quality);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: 'Conversion failed', details: err.message });
+  }
+});
+
+// Get conversion progress
+app.get('/api/conversion/:id/status', async (req, res) => {
+  const db = await getDatabase();
+  const result = db.exec('SELECT * FROM conversions WHERE id = ?', [parseInt(req.params.id)]);
+  
+  if (result.length === 0 || result[0].values.length === 0) {
+    return res.status(404).json({ error: 'Conversion not found' });
+  }
+
+  const columns = result[0].columns;
+  const row = result[0].values[0];
+  const conversion = {};
+  columns.forEach((col, i) => {
+    conversion[col] = row[i];
+  });
+
+  res.json(conversion);
+});
+
+// Delete conversion
+app.delete('/api/conversion/:id', async (req, res) => {
+  const config = loadConfig();
+  const converter = new VideoConverter(config.ffmpegPath);
+  
+  try {
+    await converter.deleteConversion(parseInt(req.params.id));
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Delete failed', details: err.message });
   }
 });
 

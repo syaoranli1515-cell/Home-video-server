@@ -45,8 +45,24 @@ async function getDatabase() {
     )
   `);
   
+  db.run(`
+    CREATE TABLE IF NOT EXISTS conversions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      original_video_id INTEGER NOT NULL,
+      converted_file_path TEXT UNIQUE NOT NULL,
+      quality TEXT NOT NULL,
+      status TEXT DEFAULT 'pending',
+      progress INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      completed_at DATETIME,
+      FOREIGN KEY (original_video_id) REFERENCES videos(id) ON DELETE CASCADE
+    )
+  `);
+  
   db.run(`CREATE INDEX IF NOT EXISTS idx_folder ON videos(folder_name)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_filename ON videos(filename)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_conversions_original ON conversions(original_video_id)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_conversions_status ON conversions(status)`);
   
   return db;
 }
