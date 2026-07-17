@@ -30,6 +30,10 @@ function loadConfig() {
 
 // Helper to save config
 function saveConfig(config) {
+  const dir = path.dirname(configPath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 }
 
