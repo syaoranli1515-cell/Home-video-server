@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const ffmpeg = require('fluent-ffmpeg');
-const db = require('../db/database');
+const { getDatabase, saveDatabase } = require('../db/database');
 
 class MediaScanner {
   constructor(mediaPath, ffmpegPath) {
@@ -12,7 +12,7 @@ class MediaScanner {
     this.videoExtensions = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm'];
   }
 
-  scanDirectory(dir, folderName = '') {
+  async scanDirectory(dir, folderName = '') {
     const videos = [];
     
     if (!fs.existsSync(dir)) {
@@ -26,7 +26,7 @@ class MediaScanner {
       
       if (item.isDirectory()) {
         const subFolderName = folderName ? `${folderName}/${item.name}` : item.name;
-        videos.push(...this.scanDirectory(fullPath, subFolderName));
+        videos.push(...await this.scanDirectory(fullPath, subFolderName));
       } else if (item.isFile()) {
         const ext = path.extname(item.name).toLowerCase();
         if (this.videoExtensions.includes(ext)) {
@@ -67,7 +67,8 @@ class MediaScanner {
 
   async scanAndStore() {
     console.log('Starting media scan...');
-    const videos = this.scanDirectory(this.mediaPath);
+    const db = await getDatabase();
+    const videos = await this.scanDirectory(this.mediaPath);
     console.log(`Found ${videos.length} video files`);
 
     const results = {
@@ -79,25 +80,23 @@ class MediaScanner {
 
     // Clean up old entries not in current scan
     const currentPaths = videos.map(v => v.filePath);
-    const stmt = db.prepare('DELETE FROM videos WHERE file_path NOT IN (?)');
     
     // Delete videos that no longer exist
-    db.exec('BEGIN TRANSACTION');
     try {
-      const existingVideos = db.prepare('SELECT file_path FROM videos').all();
-      for (const video of existingVideos) {
-        if (!currentPaths.includes(video.file_path)) {
-          db.prepare('DELETE FROM videos WHERE file_path = ?').run(video.file_path);
+      const existingVideos = db.exec('SELECT file_path, thumbnail_path FROM videos');
+      for (const row of existingVideos) {
+        const filePath = row[0];
+        const thumbPath = row[1];
+        if (!currentPaths.includes(filePath)) {
+          db.run('DELETE FROM videos WHERE file_path = ?', [filePath]);
           // Also delete thumbnail if exists
-          const thumb = db.prepare('SELECT thumbnail_path FROM videos WHERE file_path = ?').get(video.file_path);
-          if (thumb && thumb.thumbnail_path && fs.existsSync(thumb.thumbnail_path)) {
-            fs.unlinkSync(thumb.thumbnail_path);
+          if (thumbPath && fs.existsSync(path.join(__dirname, '../../public', thumbPath))) {
+            fs.unlinkSync(path.join(__dirname, '../../public', thumbPath));
           }
         }
       }
-      db.exec('COMMIT');
+      saveDatabase();
     } catch (err) {
-      db.exec('ROLLBACK');
       console.error('Error cleaning up old entries:', err);
     }
 
@@ -107,9 +106,9 @@ class MediaScanner {
         results.folders.add(video.folderName);
         
         // Check if video already exists
-        const existing = db.prepare('SELECT * FROM videos WHERE file_path = ?').get(video.filePath);
+        const existing = db.exec('SELECT * FROM videos WHERE file_path = ?', [video.filePath]);
         
-        if (existing) {
+        if (existing && existing.length > 0) {
           results.processed++;
           continue;
         }
@@ -133,11 +132,12 @@ class MediaScanner {
         }
 
         // Insert into database
-        db.prepare(`
+        const hasThumbnail = fs.existsSync(thumbnailPath);
+        db.run(`
           INSERT OR REPLACE INTO videos (file_path, filename, folder_name, duration, thumbnail_path, updated_at)
           VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        `).run(video.filePath, video.filename, video.folderName, duration, 
-          fs.existsSync(thumbnailPath) ? `/thumbnails/${thumbnailFilename}` : null);
+        `, [video.filePath, video.filename, video.folderName, duration, 
+          hasThumbnail ? `/thumbnails/${thumbnailFilename}` : null]);
 
         results.processed++;
         console.log(`Processed: ${video.filename}`);
@@ -147,6 +147,7 @@ class MediaScanner {
       }
     }
 
+    saveDatabase();
     console.log('Scan complete!');
     return {
       ...results,
